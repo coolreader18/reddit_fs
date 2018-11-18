@@ -2,6 +2,7 @@ use fuse::{FileAttr, FileType, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
 use libc::ENOENT;
 use rawr::errors::APIError;
 use rawr::prelude::*;
+use rawr::responses::listing::{Listing, Submission};
 use rawr::responses::user::{UserAbout, UserAboutData};
 use std::ffi::OsStr;
 use std::iter::Extend;
@@ -19,20 +20,23 @@ enum Resource {
   Username(usize),
   Created(usize),
   Summary(usize),
+  UserPosts(usize),
 }
 
 impl Resource {
-  const TOP_MASK: u64 = 0b00001;
-  const USER_MASK: u64 = 0b00010;
-  const LINK_KARMA_MASK: u64 = 0b00011;
-  const COMMENT_KARMA_MASK: u64 = 0b00100;
-  const USERNAME_MASK: u64 = 0b00101;
-  const CREATED_MASK: u64 = 0b00110;
-  const SUMMARY_MASK: u64 = 0b00111;
+  const MASK_SIZE: u64 = 8;
+  const TOP_MASK: u64 = 0b00000001;
+  const USER_MASK: u64 = 0b00000010;
+  const LINK_KARMA_MASK: u64 = 0b00000011;
+  const COMMENT_KARMA_MASK: u64 = 0b00000100;
+  const USERNAME_MASK: u64 = 0b00000101;
+  const CREATED_MASK: u64 = 0b00000110;
+  const SUMMARY_MASK: u64 = 0b00000111;
+  const USER_POSTS_MASK: u64 = 0b00001000;
 
   pub fn from_ino(ino: u64) -> Resource {
-    let val = ino as usize >> 5;
-    match keep_bits(ino, 5) {
+    let val = ino as usize >> Resource::MASK_SIZE;
+    match keep_bits(ino, Resource::MASK_SIZE) {
       Resource::TOP_MASK => Resource::Top,
       Resource::USER_MASK => Resource::User(val),
       Resource::LINK_KARMA_MASK => Resource::LinkKarma(val),
@@ -40,6 +44,7 @@ impl Resource {
       Resource::USERNAME_MASK => Resource::Username(val),
       Resource::CREATED_MASK => Resource::Created(val),
       Resource::SUMMARY_MASK => Resource::Summary(val),
+      Resource::USER_POSTS_MASK => Resource::UserPosts(val),
       _ => panic!("Invalid ino type"),
     }
   }
@@ -47,7 +52,7 @@ impl Resource {
   pub fn to_ino(&self) -> u64 {
     #[inline]
     fn shl(val: &usize, mask: u64) -> u64 {
-      (*val as u64) << 5 | mask
+      (*val as u64) << Resource::MASK_SIZE | mask
     }
     match self {
       Resource::Top => Resource::TOP_MASK,
@@ -57,6 +62,15 @@ impl Resource {
       Resource::Username(val) => shl(val, Resource::USERNAME_MASK),
       Resource::Created(val) => shl(val, Resource::CREATED_MASK),
       Resource::Summary(val) => shl(val, Resource::SUMMARY_MASK),
+      Resource::UserPosts(val) => shl(val, Resource::USER_POSTS_MASK),
+    }
+  }
+  pub fn filetype(&self) -> FileType {
+    use self::FileType::*;
+    use self::Resource::*;
+    match self {
+      Top | User(_) | UserPosts(_) => Directory,
+      LinkKarma(_) | CommentKarma(_) | Username(_) | Created(_) | Summary(_) => RegularFile,
     }
   }
 }
@@ -93,7 +107,7 @@ A redditor for {age} years
     )
   }
 
-  pub fn attrs(&self, ino: u64, is_dir: bool, size: u64) -> FileAttr {
+  pub fn attrs(&self, ino: u64, filetype: FileType, size: u64) -> FileAttr {
     let ts = self.timespec();
     FileAttr {
       ino,
@@ -103,11 +117,7 @@ A redditor for {age} years
       mtime: ts,
       ctime: ts,
       crtime: ts,
-      kind: if is_dir {
-        FileType::Directory
-      } else {
-        FileType::RegularFile
-      },
+      kind: filetype,
       perm: 0o644,
       nlink: 0,
       uid: unsafe { libc::getuid() },
@@ -125,6 +135,20 @@ A redditor for {age} years
 pub struct UserFS {
   client: RedditClient,
   users: indexmap::IndexMap<String, User>,
+  user_posts: std::collections::HashMap<String, Vec<Submission>>,
+}
+
+fn fetch_user_posts(client: &RedditClient, username: String) -> Result<Vec<Submission>, APIError> {
+  let url = format!("/user/{}/submitted?raw_json=1&limit=10", username);
+  let result = client.get_json::<Listing>(&url, false)?;
+  Ok(
+    result
+      .data
+      .children
+      .into_iter()
+      .map(|thing| thing.data)
+      .collect::<Vec<_>>(),
+  )
 }
 
 impl UserFS {
@@ -132,6 +156,7 @@ impl UserFS {
     UserFS {
       client,
       users: indexmap::IndexMap::default(),
+      user_posts: std::collections::HashMap::default(),
     }
   }
 
@@ -158,11 +183,24 @@ impl UserFS {
       Resource::Created(idx) => format!("{}\n", self.get_user(idx).about.created),
       Resource::Username(idx) => format!("{}\n", self.get_user(idx).about.name),
       Resource::Summary(idx) => self.get_user(idx).summary(),
-      _ => panic!("invalid resource ino"),
+      _ => panic!("can't get content of resource"),
     }
   }
   fn resource_len(&self, resource: Resource) -> u64 {
-    self.resource_content(resource).len() as u64
+    if resource.filetype() == FileType::RegularFile {
+      self.resource_content(resource).len() as u64
+    } else {
+      0
+    }
+  }
+
+  fn user_posts(&mut self, username: String) -> Result<&Vec<Submission>, APIError> {
+    use std::collections::hash_map::Entry;
+
+    match self.user_posts.entry(username.clone()) {
+      Entry::Occupied(o) => Ok(o.into_mut()),
+      Entry::Vacant(v) => Ok(v.insert(fetch_user_posts(&self.client, username)?)),
+    }
   }
 }
 
@@ -173,6 +211,7 @@ fn lookup_user_resource(name: &str, i: usize) -> Option<Resource> {
     "username" => Resource::Username(i),
     "created" => Resource::Created(i),
     "summary" => Resource::Summary(i),
+    "_posts" => Resource::UserPosts(i),
     _ => return None,
   })
 }
@@ -185,7 +224,7 @@ impl fuse::Filesystem for UserFS {
         if let Ok((i, user)) = self.get_user_by_name(name) {
           reply.entry(
             &user.timespec(),
-            &user.attrs(Resource::User(i).to_ino(), true, 0),
+            &user.attrs(Resource::User(i).to_ino(), FileType::Directory, 0),
             0,
           );
         } else {
@@ -203,7 +242,11 @@ impl fuse::Filesystem for UserFS {
         let user = self.get_user(i);
         reply.entry(
           &user.timespec(),
-          &user.attrs(resource.to_ino(), false, self.resource_len(resource)),
+          &user.attrs(
+            resource.to_ino(),
+            resource.filetype(),
+            self.resource_len(resource),
+          ),
           0,
         );
       }
@@ -236,11 +279,9 @@ impl fuse::Filesystem for UserFS {
           },
         );
       }
-      Resource::User(val) => {
-        let user = self.get_user(val);
-        reply.attr(&user.timespec(), &user.attrs(ino, true, 0));
-      }
-      Resource::LinkKarma(val)
+      Resource::User(val)
+      | Resource::UserPosts(val)
+      | Resource::LinkKarma(val)
       | Resource::CommentKarma(val)
       | Resource::Username(val)
       | Resource::Created(val)
@@ -248,7 +289,7 @@ impl fuse::Filesystem for UserFS {
         let user = self.get_user(val);
         reply.attr(
           &user.timespec(),
-          &user.attrs(ino, false, self.resource_len(resource)),
+          &user.attrs(ino, resource.filetype(), self.resource_len(resource)),
         );
       }
     }
@@ -280,6 +321,9 @@ impl fuse::Filesystem for UserFS {
       (1, FileType::Directory, ".."),
     ];
     match Resource::from_ino(ino) {
+      Resource::Top => for (i, user) in self.users.keys().enumerate() {
+        out.push((Resource::User(i).to_ino(), FileType::Directory, user));
+      },
       Resource::User(idx) => out.extend(
         [
           "linkkarma",
@@ -287,16 +331,19 @@ impl fuse::Filesystem for UserFS {
           "username",
           "created",
           "summary",
+          "_posts",
         ]
           .iter()
           .map(move |filename| {
-            let ino = lookup_user_resource(filename, idx).unwrap().to_ino() as u64;
-            (ino, FileType::RegularFile, *filename)
+            let resource = lookup_user_resource(filename, idx).unwrap();
+            (resource.to_ino() as u64, resource.filetype(), *filename)
           }),
       ),
-      Resource::Top => for (i, user) in self.users.keys().enumerate() {
-        out.push((Resource::User(i).to_ino(), FileType::Directory, user));
-      },
+      Resource::UserPosts(idx) => {
+        let username = self.get_user(idx).about.name.clone();
+        let posts = self.user_posts(username).expect("Couldn't get posts");
+        for Submission { .. } in posts.iter() {}
+      }
       _ => return reply.error(libc::ENOTDIR),
     };
     for (i, (ino, file_type, filename)) in out.iter().enumerate().skip(offset as usize) {

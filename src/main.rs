@@ -15,7 +15,7 @@ use std::time::Duration;
 
 mod user;
 
-const UA: &'static str = "redditfs";
+const UA: &'static str = "linux:reddit_fs:v0.1.1 (by /u/coolreader18)";
 
 fn main() {
   let mountpoint = std::env::args_os().nth(1).unwrap();
