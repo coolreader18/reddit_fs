@@ -1,14 +1,8 @@
-use fuse;
-use indexmap;
-use libc;
-use rawr;
-use time;
-
-use fuse::ReplyEntry;
-use fuse::Request;
+use fuse::{FileAttr, FileType, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
 use libc::ENOENT;
+use rawr::errors::APIError;
 use rawr::prelude::*;
-use rawr::responses::user::*;
+use rawr::responses::user::{UserAbout, UserAboutData};
 use std::ffi::OsStr;
 use std::iter::Extend;
 
@@ -77,7 +71,7 @@ impl User {
   pub fn new(about: UserAboutData) -> User {
     User { about }
   }
-  pub fn fetch(client: &RedditClient, name: String) -> Result<User, rawr::errors::APIError> {
+  pub fn fetch(client: &RedditClient, name: String) -> Result<User, APIError> {
     let url = format!("/user/{}/about?raw_json=1", name);
     client
       .get_json::<UserAbout>(&url, false)
@@ -99,9 +93,9 @@ A redditor for {age} years
     )
   }
 
-  pub fn attrs(&self, ino: u64, is_dir: bool, size: u64) -> fuse::FileAttr {
+  pub fn attrs(&self, ino: u64, is_dir: bool, size: u64) -> FileAttr {
     let ts = self.timespec();
-    fuse::FileAttr {
+    FileAttr {
       ino,
       size,
       blocks: size / 512,
@@ -110,9 +104,9 @@ A redditor for {age} years
       ctime: ts,
       crtime: ts,
       kind: if is_dir {
-        fuse::FileType::Directory
+        FileType::Directory
       } else {
-        fuse::FileType::RegularFile
+        FileType::RegularFile
       },
       perm: 0o644,
       nlink: 0,
@@ -141,7 +135,7 @@ impl UserFS {
     }
   }
 
-  fn get_user_by_name(&mut self, name: String) -> Result<(usize, &User), rawr::errors::APIError> {
+  fn get_user_by_name(&mut self, name: String) -> Result<(usize, &User), APIError> {
     let name = name.to_lowercase();
     let entry = self.users.entry(name.clone());
     let i = entry.index();
@@ -173,14 +167,14 @@ impl UserFS {
 }
 
 fn lookup_user_resource(name: &str, i: usize) -> Option<Resource> {
-  match name {
-    "linkkarma" => Some(Resource::LinkKarma(i)),
-    "commentkarma" => Some(Resource::CommentKarma(i)),
-    "username" => Some(Resource::Username(i)),
-    "created" => Some(Resource::Created(i)),
-    "summary" => Some(Resource::Summary(i)),
-    _ => None,
-  }
+  Some(match name {
+    "linkkarma" => Resource::LinkKarma(i),
+    "commentkarma" => Resource::CommentKarma(i),
+    "username" => Resource::Username(i),
+    "created" => Resource::Created(i),
+    "summary" => Resource::Summary(i),
+    _ => return None,
+  })
 }
 
 impl fuse::Filesystem for UserFS {
@@ -217,14 +211,14 @@ impl fuse::Filesystem for UserFS {
     }
   }
 
-  fn getattr(&mut self, _req: &Request, ino: u64, reply: fuse::ReplyAttr) {
+  fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
     let resource = Resource::from_ino(ino);
     match resource {
       Resource::Top => {
         let ts = time::Timespec::new(0, 0);
         reply.attr(
           &ts,
-          &fuse::FileAttr {
+          &FileAttr {
             ino,
             size: 0,
             blocks: 0,
@@ -232,7 +226,7 @@ impl fuse::Filesystem for UserFS {
             mtime: ts,
             ctime: ts,
             crtime: ts,
-            kind: fuse::FileType::Directory,
+            kind: FileType::Directory,
             perm: 0o755,
             nlink: 0,
             uid: unsafe { libc::getuid() },
@@ -267,7 +261,7 @@ impl fuse::Filesystem for UserFS {
     _fh: u64,
     _offset: i64,
     _size: u32,
-    reply: fuse::ReplyData,
+    reply: ReplyData,
   ) {
     let data = self.resource_content(Resource::from_ino(ino));
     reply.data(data.as_bytes());
@@ -279,11 +273,11 @@ impl fuse::Filesystem for UserFS {
     ino: u64,
     _fh: u64,
     offset: i64,
-    mut reply: fuse::ReplyDirectory,
+    mut reply: ReplyDirectory,
   ) {
-    let mut out: Vec<(u64, fuse::FileType, &str)> = vec![
-      (1, fuse::FileType::Directory, "."),
-      (1, fuse::FileType::Directory, ".."),
+    let mut out: Vec<(u64, FileType, &str)> = vec![
+      (1, FileType::Directory, "."),
+      (1, FileType::Directory, ".."),
     ];
     match Resource::from_ino(ino) {
       Resource::User(idx) => out.extend(
@@ -297,11 +291,11 @@ impl fuse::Filesystem for UserFS {
           .iter()
           .map(move |filename| {
             let ino = lookup_user_resource(filename, idx).unwrap().to_ino() as u64;
-            (ino, fuse::FileType::RegularFile, *filename)
+            (ino, FileType::RegularFile, *filename)
           }),
       ),
       Resource::Top => for (i, user) in self.users.keys().enumerate() {
-        out.push((Resource::User(i).to_ino(), fuse::FileType::Directory, user));
+        out.push((Resource::User(i).to_ino(), FileType::Directory, user));
       },
       _ => return reply.error(libc::ENOTDIR),
     };
