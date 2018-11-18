@@ -33,15 +33,16 @@ fn main() {
     r.store(false, Ordering::SeqCst);
   }).expect("Error setting Ctrl-C handler");
 
-  unsafe {
-    if let Some(str_mountpoint) = mountpoint.to_str() {
-      println!("Mounting to {}", str_mountpoint);
-    }
-    let _fuse_handle = fuse::spawn_mount(fs, &mountpoint, &options).unwrap();
-
-    while running.load(Ordering::SeqCst) {
-      thread::sleep(Duration::from_millis(100));
-    }
-    println!("Unmounting and exiting");
+  if let Some(str_mountpoint) = mountpoint.to_str() {
+    println!("Mounting to {}", str_mountpoint);
   }
+  let _fuse_handle = match unsafe { fuse::spawn_mount(fs, &mountpoint, &options) } {
+    Ok(handle) => handle,
+    Err(err) => return eprintln!("Error mounting: {}", err),
+  };
+
+  while running.load(Ordering::SeqCst) {
+    thread::sleep(Duration::from_millis(100));
+  }
+  println!("Unmounting and exiting");
 }
