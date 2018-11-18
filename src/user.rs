@@ -24,6 +24,7 @@ enum Resource {
   CommentKarma(usize),
   Username(usize),
   Created(usize),
+  Summary(usize),
 }
 
 impl Resource {
@@ -33,6 +34,7 @@ impl Resource {
   const COMMENT_KARMA_MASK: u64 = 0b00100;
   const USERNAME_MASK: u64 = 0b00101;
   const CREATED_MASK: u64 = 0b00110;
+  const SUMMARY_MASK: u64 = 0b00111;
 
   pub fn from_ino(ino: u64) -> Resource {
     let val = ino as usize >> 5;
@@ -43,6 +45,7 @@ impl Resource {
       Resource::COMMENT_KARMA_MASK => Resource::CommentKarma(val),
       Resource::USERNAME_MASK => Resource::Username(val),
       Resource::CREATED_MASK => Resource::Created(val),
+      Resource::SUMMARY_MASK => Resource::Summary(val),
       _ => panic!("Invalid ino type"),
     }
   }
@@ -59,6 +62,7 @@ impl Resource {
       Resource::CommentKarma(val) => shl(val, Resource::COMMENT_KARMA_MASK),
       Resource::Username(val) => shl(val, Resource::USERNAME_MASK),
       Resource::Created(val) => shl(val, Resource::CREATED_MASK),
+      Resource::Summary(val) => shl(val, Resource::SUMMARY_MASK),
     }
   }
 }
@@ -80,7 +84,7 @@ impl User {
       .and_then(|res| Ok(User::new(res.data)))
   }
 
-  pub fn content(&self) -> String {
+  pub fn summary(&self) -> String {
     let age = time::get_time() - time::Timespec::new(self.about.created, 0);
     format!(
       r#"{name}
@@ -95,9 +99,7 @@ A redditor for {age} years
     )
   }
 
-  pub fn attrs(&self, ino: u64, is_dir: bool) -> fuse::FileAttr {
-    let content = self.content();
-    let size = content.len() as u64;
+  pub fn attrs(&self, ino: u64, is_dir: bool, size: u64) -> fuse::FileAttr {
     let ts = self.timespec();
     fuse::FileAttr {
       ino,
@@ -153,6 +155,20 @@ impl UserFS {
   fn get_user(&self, idx: usize) -> &User {
     self.users.get_index(idx).unwrap().1
   }
+
+  fn resource_content(&self, resource: Resource) -> String {
+    match resource {
+      Resource::LinkKarma(idx) => format!("{}\n", self.get_user(idx).about.link_karma),
+      Resource::CommentKarma(idx) => format!("{}\n", self.get_user(idx).about.comment_karma),
+      Resource::Created(idx) => format!("{}\n", self.get_user(idx).about.created),
+      Resource::Username(idx) => format!("{}\n", self.get_user(idx).about.name),
+      Resource::Summary(idx) => self.get_user(idx).summary(),
+      _ => panic!("invalid resource ino"),
+    }
+  }
+  fn resource_len(&self, resource: Resource) -> u64 {
+    self.resource_content(resource).len() as u64
+  }
 }
 
 fn lookup_user_resource(name: &str, i: usize) -> Option<Resource> {
@@ -161,6 +177,7 @@ fn lookup_user_resource(name: &str, i: usize) -> Option<Resource> {
     "commentkarma" => Some(Resource::CommentKarma(i)),
     "username" => Some(Resource::Username(i)),
     "created" => Some(Resource::Created(i)),
+    "summary" => Some(Resource::Summary(i)),
     _ => None,
   }
 }
@@ -173,7 +190,7 @@ impl fuse::Filesystem for UserFS {
         if let Ok((i, user)) = self.get_user_by_name(name) {
           reply.entry(
             &user.timespec(),
-            &user.attrs(Resource::User(i).to_ino(), true),
+            &user.attrs(Resource::User(i).to_ino(), true, 0),
             0,
           );
         } else {
@@ -189,14 +206,19 @@ impl fuse::Filesystem for UserFS {
           }
         };
         let user = self.get_user(i);
-        reply.entry(&user.timespec(), &user.attrs(resource.to_ino(), false), 0);
+        reply.entry(
+          &user.timespec(),
+          &user.attrs(resource.to_ino(), false, self.resource_len(resource)),
+          0,
+        );
       }
       _ => {}
     }
   }
 
   fn getattr(&mut self, _req: &Request, ino: u64, reply: fuse::ReplyAttr) {
-    match Resource::from_ino(ino) {
+    let resource = Resource::from_ino(ino);
+    match resource {
       Resource::Top => {
         let ts = time::Timespec::new(0, 0);
         reply.attr(
@@ -221,14 +243,18 @@ impl fuse::Filesystem for UserFS {
       }
       Resource::User(val) => {
         let user = self.get_user(val);
-        reply.attr(&user.timespec(), &user.attrs(ino, true));
+        reply.attr(&user.timespec(), &user.attrs(ino, true, 0));
       }
       Resource::LinkKarma(val)
       | Resource::CommentKarma(val)
       | Resource::Username(val)
-      | Resource::Created(val) => {
+      | Resource::Created(val)
+      | Resource::Summary(val) => {
         let user = self.get_user(val);
-        reply.attr(&user.timespec(), &user.attrs(ino, false));
+        reply.attr(
+          &user.timespec(),
+          &user.attrs(ino, false, self.resource_len(resource)),
+        );
       }
     }
   }
@@ -242,25 +268,7 @@ impl fuse::Filesystem for UserFS {
     _size: u32,
     reply: fuse::ReplyData,
   ) {
-    let data = match Resource::from_ino(ino) {
-      Resource::LinkKarma(idx) => {
-        let user = self.get_user(idx);
-        format!("{}\n", user.about.link_karma)
-      }
-      Resource::CommentKarma(idx) => {
-        let user = self.get_user(idx);
-        format!("{}\n", user.about.comment_karma)
-      }
-      Resource::Created(idx) => {
-        let user = self.get_user(idx);
-        format!("{}\n", user.about.created)
-      }
-      Resource::Username(idx) => {
-        let user = self.get_user(idx);
-        format!("{}\n", user.about.name)
-      }
-      _ => panic!("invalid resource ino"),
-    };
+    let data = self.resource_content(Resource::from_ino(ino));
     reply.data(data.as_bytes());
   }
 
@@ -276,10 +284,15 @@ impl fuse::Filesystem for UserFS {
       (1, fuse::FileType::Directory, "."),
       (1, fuse::FileType::Directory, ".."),
     ];
-    use std::iter::Iterator;
     match Resource::from_ino(ino) {
       Resource::User(idx) => out.extend(
-        ["linkkarma", "commentkarma", "username", "created"]
+        [
+          "linkkarma",
+          "commentkarma",
+          "username",
+          "created",
+          "summary",
+        ]
           .iter()
           .map(move |filename| {
             let ino = lookup_user_resource(filename, idx).unwrap().to_ino() as u64;
