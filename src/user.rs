@@ -142,9 +142,10 @@ impl UserFS {
   }
 
   fn get_user_by_name(&mut self, name: String) -> Result<(usize, &User), rawr::errors::APIError> {
-    use indexmap::map::Entry;
+    let name = name.to_lowercase();
     let entry = self.users.entry(name.clone());
     let i = entry.index();
+    use indexmap::map::Entry;
     let user = match entry {
       Entry::Occupied(o) => o.into_mut(),
       Entry::Vacant(v) => v.insert(User::fetch(&self.client, name)?),
