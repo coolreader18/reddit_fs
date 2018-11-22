@@ -1,3 +1,4 @@
+use e_num::ENum;
 use fuse::{FileAttr, FileType, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request};
 use libc::ENOENT;
 use rawr::errors::APIError;
@@ -7,12 +8,10 @@ use rawr::responses::user::{UserAbout, UserAboutData};
 use std::ffi::OsStr;
 use std::iter::Extend;
 
-fn keep_bits(a: u64, n: u64) -> u64 {
-  a << 64 - n >> 64 - n
-}
-
-#[derive(Debug)]
+#[derive(Debug, ENum)]
+#[e_num(start_at = 2)]
 enum Resource {
+  #[e_num(constant = 1)]
   Top,
   User(usize),
   LinkKarma(usize),
@@ -24,46 +23,11 @@ enum Resource {
 }
 
 impl Resource {
-  const MASK_SIZE: u64 = 8;
-  const TOP_MASK: u64 = 0b00000001;
-  const USER_MASK: u64 = 0b00000010;
-  const LINK_KARMA_MASK: u64 = 0b00000011;
-  const COMMENT_KARMA_MASK: u64 = 0b00000100;
-  const USERNAME_MASK: u64 = 0b00000101;
-  const CREATED_MASK: u64 = 0b00000110;
-  const SUMMARY_MASK: u64 = 0b00000111;
-  const USER_POSTS_MASK: u64 = 0b00001000;
-
   pub fn from_ino(ino: u64) -> Resource {
-    let val = ino as usize >> Resource::MASK_SIZE;
-    match keep_bits(ino, Resource::MASK_SIZE) {
-      Resource::TOP_MASK => Resource::Top,
-      Resource::USER_MASK => Resource::User(val),
-      Resource::LINK_KARMA_MASK => Resource::LinkKarma(val),
-      Resource::COMMENT_KARMA_MASK => Resource::CommentKarma(val),
-      Resource::USERNAME_MASK => Resource::Username(val),
-      Resource::CREATED_MASK => Resource::Created(val),
-      Resource::SUMMARY_MASK => Resource::Summary(val),
-      Resource::USER_POSTS_MASK => Resource::UserPosts(val),
-      _ => panic!("Invalid ino type"),
-    }
+    Resource::from_num(ino as usize)
   }
-
   pub fn to_ino(&self) -> u64 {
-    #[inline]
-    fn shl(val: &usize, mask: u64) -> u64 {
-      (*val as u64) << Resource::MASK_SIZE | mask
-    }
-    match self {
-      Resource::Top => Resource::TOP_MASK,
-      Resource::User(val) => shl(val, Resource::USER_MASK),
-      Resource::LinkKarma(val) => shl(val, Resource::LINK_KARMA_MASK),
-      Resource::CommentKarma(val) => shl(val, Resource::COMMENT_KARMA_MASK),
-      Resource::Username(val) => shl(val, Resource::USERNAME_MASK),
-      Resource::Created(val) => shl(val, Resource::CREATED_MASK),
-      Resource::Summary(val) => shl(val, Resource::SUMMARY_MASK),
-      Resource::UserPosts(val) => shl(val, Resource::USER_POSTS_MASK),
-    }
+    self.to_num() as u64
   }
   pub fn filetype(&self) -> FileType {
     use self::FileType::*;
@@ -234,10 +198,7 @@ impl fuse::Filesystem for UserFS {
       Resource::User(i) => {
         let resource = match lookup_user_resource(name.as_str(), i) {
           Some(resource) => resource,
-          None => {
-            reply.error(ENOENT);
-            return;
-          }
+          None => return reply.error(ENOENT),
         };
         let user = self.get_user(i);
         reply.entry(

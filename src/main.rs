@@ -1,4 +1,6 @@
 extern crate ctrlc;
+#[macro_use]
+extern crate e_num;
 extern crate fuse;
 extern crate indexmap;
 extern crate libc;

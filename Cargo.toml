@@ -10,3 +10,4 @@ libc = "0.2"
 time = "0.1"
 indexmap = "1.0"
 ctrlc = "3.1"
+e_num = { git = "https://github.com/coolreader18/e_num" }
